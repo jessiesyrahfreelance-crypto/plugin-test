@@ -54,7 +54,39 @@ const WPMUDEV_DriveTest = () => {
     };
 
     // To be implemented in tasks 2.2+.
-    const handleSaveCredentials = async () => {};
+    // Inside WPMUDEV_DriveTest component, replace the placeholder with this:
+    const handleSaveCredentials = async () => {
+    const clientId = (credentials.clientId || '').trim();
+    const clientSecret = (credentials.clientSecret || '').trim();
+
+    if (!clientId || !clientSecret) {
+        showNotice(__('Please enter Client ID and Client Secret.', 'wpmudev-plugin-test'), 'error');
+        return;
+    }
+
+    setIsLoading(true);
+    try {
+        const res = await apiFetch({
+        path: '/' + window.wpmudevDriveTest.restEndpointSave,
+        method: 'POST',
+        headers: { 'X-WP-Nonce': window.wpmudevDriveTest.nonce },
+        data: { client_id: clientId, client_secret: clientSecret },
+        });
+
+        if (!res?.success) {
+        throw new Error(res?.message || __('Failed to save credentials.', 'wpmudev-plugin-test'));
+        }
+
+        setHasCredentials(true);
+        setShowCredentials(false);
+        setCredentials({ clientId: '', clientSecret: '' });
+        showNotice(__('Credentials saved. You can now authenticate with Google Drive.', 'wpmudev-plugin-test'), 'success');
+    } catch (e) {
+        showNotice(e?.message || __('Failed to save credentials. Please try again.', 'wpmudev-plugin-test'), 'error');
+    } finally {
+        setIsLoading(false);
+    }
+    };
 
     // 2.3: Start OAuth 2.0 flow by requesting the consent URL and redirecting.
     const handleAuth = async () => {
