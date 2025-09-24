@@ -239,6 +239,8 @@ class Drive_API extends Base {
 
 			$auth_url = $this->client->createAuthUrl();
 
+			error_log('Drive Auth URL: ' . $auth_url);
+
 			return new WP_REST_Response(
 				array(
 					'success'  => true,
