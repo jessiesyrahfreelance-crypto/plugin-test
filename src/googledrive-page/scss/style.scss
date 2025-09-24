@@ -1,0 +1,152 @@
+// Overwrite font path.
+$sui-font-path: '~@wpmudev/shared-ui/dist/fonts/';
+$sui-image-path: '~@wpmudev/shared-ui/dist/images/';
+
+// Share UI styles
+@import "@wpmudev/shared-ui";
+
+.sui-box-body {
+    .components-base-control {
+        min-width: 100%;
+
+        input[type="text"] {
+            min-width: 100%;
+        }
+
+        label {
+            display: block;
+        }
+    }
+}
+
+// Google Drive Test specific styles
+.drive-file-input {
+    width: 100%;
+    padding: 12px;
+    border: 2px dashed #c3c4c7;
+    border-radius: 4px;
+    background: #f6f7f7;
+    cursor: pointer;
+    transition: all 0.3s ease;
+
+    &:hover {
+        border-color: #0073aa;
+        background: #f0f6fc;
+    }
+
+    &:focus {
+        outline: none;
+        border-color: #0073aa;
+        box-shadow: 0 0 0 2px rgba(0, 115, 170, 0.25);
+    }
+}
+
+.drive-loading {
+    text-align: center;
+    padding: 40px 20px;
+
+    .components-spinner {
+        margin: 0 auto 10px;
+    }
+
+    p {
+        color: #8c8f94;
+        margin: 0;
+    }
+}
+
+.drive-files-grid {
+    display: flex;
+    flex-direction: column;
+    gap: 12px;
+}
+
+.drive-file-item {
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+    padding: 15px;
+    border: 1px solid #ddd;
+    border-radius: 4px;
+    background: #fff;
+    transition: all 0.2s ease;
+
+    &:hover {
+        border-color: #0073aa;
+        box-shadow: 0 2px 8px rgba(0, 0, 0, 0.1);
+    }
+
+    .file-info {
+        flex: 1;
+
+        strong {
+            display: block;
+            color: #1e1e1e;
+            margin-bottom: 4px;
+            font-size: 14px;
+        }
+
+        small {
+            color: #757575;
+            font-size: 12px;
+        }
+    }
+
+    .file-actions {
+        display: flex;
+        gap: 8px;
+        align-items: center;
+
+        .components-button {
+            &.is-secondary {
+                font-size: 12px;
+                height: 32px;
+                padding: 0 12px;
+            }
+
+            &.is-link {
+                font-size: 12px;
+                text-decoration: none;
+            }
+        }
+    }
+}
+
+// Authentication section
+.sui-description {
+    color: #757575;
+    margin-bottom: 30px;
+}
+
+// Notice styling adjustments
+.components-notice {
+    margin: 20px 0;
+
+    &.is-success {
+        border-left-color: #00a32a;
+    }
+
+    &.is-error {
+        border-left-color: #d63638;
+    }
+}
+
+// Responsive adjustments
+@media (max-width: 768px) {
+    .drive-file-item {
+        flex-direction: column;
+        align-items: flex-start;
+        gap: 15px;
+
+        .file-actions {
+            align-self: stretch;
+            justify-content: flex-end;
+        }
+    }
+
+    .sui-box-header {
+        .sui-actions-right {
+            margin-top: 15px;
+        }
+    }
+}
