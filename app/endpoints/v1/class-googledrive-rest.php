@@ -7,6 +7,8 @@
  *
  * @author        WPMUDEV (https://wpmudev.com)
  * @package       WPMUDEV\PluginTest
+ *
+ * @copyright (c) 2025, Incsub (http://incsub.com)
  */
 
 namespace WPMUDEV\PluginTest\Endpoints\V1;
@@ -71,35 +73,19 @@ class Drive_API extends Base {
 	private function setup_google_client() {
 		$auth_creds = get_option( 'wpmudev_plugin_tests_auth', array() );
 
-		if ( empty( $auth_creds ) ) {
-			return;
-		}
-
-		$client_id     = isset( $auth_creds['client_id'] ) ? $auth_creds['client_id'] : '';
-		$client_secret = isset( $auth_creds['client_secret'] ) ? $auth_creds['client_secret'] : '';
-
-		// Decrypt if stored encrypted.
-		if ( ! empty( $auth_creds['enc'] ) ) {
-			$client_id     = $this->decrypt_value( $client_id, isset( $auth_creds['iv_id'] ) ? $auth_creds['iv_id'] : '' );
-			$client_secret = $this->decrypt_value( $client_secret, isset( $auth_creds['iv_secret'] ) ? $auth_creds['iv_secret'] : '' );
-		}
-
-		$client_id     = is_string( $client_id ) ? trim( $client_id ) : '';
-		$client_secret = is_string( $client_secret ) ? trim( $client_secret ) : '';
-
-		if ( '' === $client_id || '' === $client_secret ) {
+		if ( empty( $auth_creds['client_id'] ) || empty( $auth_creds['client_secret'] ) ) {
 			return;
 		}
 
 		$this->client = new Google_Client();
-		$this->client->setClientId( $client_id );
-		$this->client->setClientSecret( $client_secret );
+		$this->client->setClientId( $auth_creds['client_id'] );
+		$this->client->setClientSecret( $auth_creds['client_secret'] );
 		$this->client->setRedirectUri( $this->redirect_uri );
 		$this->client->setScopes( $this->scopes );
 		$this->client->setAccessType( 'offline' );
 		$this->client->setPrompt( 'consent' );
 
-		// Set access token if available.
+		// Set access token if available
 		$access_token = get_option( 'wpmudev_drive_access_token', '' );
 		if ( ! empty( $access_token ) ) {
 			$this->client->setAccessToken( $access_token );
@@ -112,6 +98,7 @@ class Drive_API extends Base {
 	 * Register REST API routes.
 	 */
 	public function register_routes() {
+		// Save credentials endpoint
 		register_rest_route(
 			'wpmudev/v1/drive',
 			'/save-credentials',
@@ -121,20 +108,10 @@ class Drive_API extends Base {
 				'permission_callback' => function () {
 					return current_user_can( 'manage_options' );
 				},
-				'args'                => array(
-					'client_id' => array(
-						'required'          => false, // validated in callback for better messages.
-						'sanitize_callback' => 'sanitize_text_field',
-					),
-					'client_secret' => array(
-						'required'          => false,
-						'sanitize_callback' => 'sanitize_text_field',
-					),
-				),
 			)
 		);
 
-		// Authentication endpoint
+		// Authentication endpoint: returns Google OAuth consent screen URL.
 		register_rest_route(
 			'wpmudev/v1/drive',
 			'/auth',
@@ -212,142 +189,132 @@ class Drive_API extends Base {
 
 	/**
 	 * Save Google OAuth credentials.
-	 *
-	 * @param WP_REST_Request $request Request.
-	 * @return WP_REST_Response|WP_Error
 	 */
 	public function save_credentials( WP_REST_Request $request ) {
-		$params        = $request->get_json_params();
-		$client_id     = isset( $params['client_id'] ) ? sanitize_text_field( wp_unslash( $params['client_id'] ) ) : sanitize_text_field( wp_unslash( $request->get_param( 'client_id' ) ) );
-		$client_secret = isset( $params['client_secret'] ) ? sanitize_text_field( wp_unslash( $params['client_secret'] ) ) : sanitize_text_field( wp_unslash( $request->get_param( 'client_secret' ) ) );
-
-		$client_id     = trim( (string) $client_id );
-		$client_secret = trim( (string) $client_secret );
+		$client_id     = sanitize_text_field( (string) $request->get_param( 'client_id' ) );
+		$client_secret = sanitize_text_field( (string) $request->get_param( 'client_secret' ) );
 
 		if ( '' === $client_id || '' === $client_secret ) {
 			return new WP_Error( 'missing_params', __( 'Client ID and Client Secret are required.', 'wpmudev-plugin-test' ), array( 'status' => 400 ) );
 		}
 
-		$stored = array(
-			'client_id'     => $client_id,
-			'client_secret' => $client_secret,
-			'enc'           => false,
+		update_option(
+			'wpmudev_plugin_tests_auth',
+			array(
+				'client_id'     => $client_id,
+				'client_secret' => $client_secret,
+			)
 		);
-
-		// Bonus: encrypt before storage if OpenSSL available.
-		if ( function_exists( 'openssl_encrypt' ) ) {
-			$key = $this->get_encryption_key();
-
-			$iv_id     = random_bytes( 16 );
-			$iv_secret = random_bytes( 16 );
-
-			$cipher_id = openssl_encrypt( $client_id, 'AES-256-CBC', $key, OPENSSL_RAW_DATA, $iv_id );
-			$cipher_cs = openssl_encrypt( $client_secret, 'AES-256-CBC', $key, OPENSSL_RAW_DATA, $iv_secret );
-
-			if ( false !== $cipher_id && false !== $cipher_cs ) {
-				$stored = array(
-					'client_id'     => base64_encode( $cipher_id ),       // phpcs:ignore WordPress.PHP.DiscouragedPHPFunctions.obfuscation_base64_encode
-					'client_secret' => base64_encode( $cipher_cs ),       // phpcs:ignore WordPress.PHP.DiscouragedPHPFunctions.obfuscation_base64_encode
-					'enc'           => true,
-					'iv_id'         => base64_encode( $iv_id ),           // phpcs:ignore WordPress.PHP.DiscouragedPHPFunctions.obfuscation_base64_encode
-					'iv_secret'     => base64_encode( $iv_secret ),       // phpcs:ignore WordPress.PHP.DiscouragedPHPFunctions.obfuscation_base64_encode
-					'alg'           => 'AES-256-CBC',
-					'created'       => time(),
-				);
-			}
-		}
-
-		update_option( 'wpmudev_plugin_tests_auth', $stored, false );
 
 		// Reinitialize Google Client with new credentials
 		$this->setup_google_client();
 
 		return new WP_REST_Response(
 			array(
-				'success'         => true,
-				'hasCredentials'  => true,
-				'message'         => __( 'Credentials saved.', 'wpmudev-plugin-test' ),
+				'success' => true,
+				'message' => __( 'Credentials saved.', 'wpmudev-plugin-test' ),
 			),
 			200
 		);
 	}
 
 	/**
-	 * Derive encryption key from WP salts.
-	 *
-	 * @return string 32-byte binary key.
+	 * Start Google OAuth flow: return consent screen URL with CSRF state.
 	 */
-	private function get_encryption_key() {
-		$material = wp_salt( 'auth' ) . AUTH_KEY . SECURE_AUTH_KEY . get_site_url();
-		return hash( 'sha256', $material, true );
-	}
-
-	/**
-	 * Decrypt a stored value.
-	 *
-	 * @param string $encoded Base64-encoded ciphertext.
-	 * @param string $iv_b64  Base64-encoded IV.
-	 *
-	 * @return string Decrypted plaintext or empty string on failure.
-	 */
-	private function decrypt_value( $encoded, $iv_b64 ) {
-		if ( ! function_exists( 'openssl_decrypt' ) ) {
-			return (string) $encoded;
-		}
-
-		$cipher = base64_decode( (string) $encoded ); // phpcs:ignore WordPress.PHP.DiscouragedPHPFunctions.obfuscation_base64_decode
-		$iv     = base64_decode( (string) $iv_b64 );  // phpcs:ignore WordPress.PHP.DiscouragedPHPFunctions.obfuscation_base64_decode
-
-		if ( empty( $cipher ) || empty( $iv ) ) {
-			return '';
-		}
-
-		$key = $this->get_encryption_key();
-
-		$plain = openssl_decrypt( $cipher, 'AES-256-CBC', $key, OPENSSL_RAW_DATA, $iv );
-
-		return is_string( $plain ) ? $plain : '';
-	}
-
-	/**
-	 * Start Google OAuth flow.
-	 */
-	public function start_auth() {
+	public function start_auth( WP_REST_Request $request ) {
 		if ( ! $this->client ) {
 			return new WP_Error( 'missing_credentials', __( 'Google OAuth credentials not configured', 'wpmudev-plugin-test' ), array( 'status' => 400 ) );
 		}
 
-		return true;
+		if ( ! class_exists( '\Google_Client' ) ) {
+			return new WP_Error( 'missing_library', __( 'Google API PHP Client library is not available.', 'wpmudev-plugin-test' ), array( 'status' => 500 ) );
+		}
+
+		try {
+			$state = wp_generate_uuid4();
+			// Store state for 10 minutes to validate on callback.
+			set_transient( 'wpmudev_drive_oauth_state_' . $state, 1, MINUTE_IN_SECONDS * 10 );
+
+			$this->client->setState( $state );
+
+			$auth_url = $this->client->createAuthUrl();
+
+			return new WP_REST_Response(
+				array(
+					'success'  => true,
+					'auth_url' => $auth_url,
+				),
+				200
+			);
+		} catch ( \Exception $e ) {
+			return new WP_Error( 'auth_init_failed', $e->getMessage(), array( 'status' => 500 ) );
+		}
 	}
 
 	/**
 	 * Handle OAuth callback.
 	 */
-	public function handle_callback() {
-		$code  = '';
-		$state = '';
+	public function handle_callback( WP_REST_Request $request ) {
+		$code  = (string) $request->get_param( 'code' );
+		$state = (string) $request->get_param( 'state' );
+
+		$redirect_back = admin_url( 'admin.php?page=wpmudev_plugintest_drive' );
 
 		if ( empty( $code ) ) {
-			wp_die( esc_html__( 'Authorization code not received', 'wpmudev-plugin-test' ) );
+			wp_safe_redirect( add_query_arg( array( 'auth' => 'failed', 'error' => rawurlencode( __( 'Authorization code not received', 'wpmudev-plugin-test' ) ) ), $redirect_back ) );
+			exit;
+		}
+
+		// Validate CSRF state
+		if ( empty( $state ) || 1 !== (int) get_transient( 'wpmudev_drive_oauth_state_' . $state ) ) {
+			wp_safe_redirect( add_query_arg( array( 'auth' => 'failed', 'error' => rawurlencode( __( 'Invalid authorization state', 'wpmudev-plugin-test' ) ) ), $redirect_back ) );
+			exit;
+		}
+		// Clear state after one use
+		delete_transient( 'wpmudev_drive_oauth_state_' . $state );
+
+		if ( ! $this->client ) {
+			wp_safe_redirect( add_query_arg( array( 'auth' => 'failed', 'error' => rawurlencode( __( 'OAuth client is not initialized', 'wpmudev-plugin-test' ) ) ), $redirect_back ) );
+			exit;
 		}
 
 		try {
-			// Exchange code for access token
-			$access_token = array();
+			$token = $this->client->fetchAccessTokenWithAuthCode( $code );
 
-			// Store tokens
-			update_option( 'wpmudev_drive_access_token', $access_token );
-			if ( isset( $access_token['refresh_token'] ) ) {
-				update_option( 'wpmudev_drive_refresh_token', $access_token );
+			if ( isset( $token['error'] ) ) {
+				$message = isset( $token['error_description'] ) ? $token['error_description'] : $token['error'];
+				wp_safe_redirect( add_query_arg( array( 'auth' => 'failed', 'error' => rawurlencode( $message ) ), $redirect_back ) );
+				exit;
 			}
-			update_option( 'wpmudev_drive_token_expires', '???' );
 
-			// Redirect back to admin page
-			wp_redirect( admin_url( 'admin.php?page=wpmudev_plugintest_drive&auth=success' ) );
+			// Persist access token and refresh token
+			update_option( 'wpmudev_drive_access_token', $token );
+
+			if ( ! empty( $token['refresh_token'] ) ) {
+				update_option( 'wpmudev_drive_refresh_token', $token['refresh_token'] );
+			} else {
+				// Keep any existing refresh token if Google didn't return a new one.
+				$existing_refresh = get_option( 'wpmudev_drive_refresh_token' );
+				if ( $existing_refresh ) {
+					$token['refresh_token'] = $existing_refresh;
+					update_option( 'wpmudev_drive_access_token', $token );
+				}
+			}
+
+			// Calculate expiry timestamp if possible
+			$created    = isset( $token['created'] ) ? (int) $token['created'] : time();
+			$expires_in = isset( $token['expires_in'] ) ? (int) $token['expires_in'] : 0;
+			$expires_at = $expires_in > 0 ? $created + $expires_in : ( time() + HOUR_IN_SECONDS );
+
+			update_option( 'wpmudev_drive_token_expires', $expires_at );
+
+			// Redirect back to admin page with success flag
+			wp_safe_redirect( add_query_arg( array( 'auth' => 'success' ), $redirect_back ) );
 			exit;
 
 		} catch ( \Exception $e ) {
-			wp_die( sprintf( /* translators: %s: error message */ esc_html__( 'Failed to get access token: %s', 'wpmudev-plugin-test' ), esc_html( $e->getMessage() ) ) );
+			wp_safe_redirect( add_query_arg( array( 'auth' => 'failed', 'error' => rawurlencode( $e->getMessage() ) ), $redirect_back ) );
+			exit;
 		}
 	}
 
@@ -359,7 +326,12 @@ class Drive_API extends Base {
 			return false;
 		}
 
-		// Check if token is expired and refresh if needed
+		// If we stored the entire token array, set it back into the client before checking.
+		$stored_token = get_option( 'wpmudev_drive_access_token', array() );
+		if ( ! empty( $stored_token ) ) {
+			$this->client->setAccessToken( $stored_token );
+		}
+
 		if ( $this->client->isAccessTokenExpired() ) {
 			$refresh_token = get_option( 'wpmudev_drive_refresh_token' );
 
@@ -370,12 +342,22 @@ class Drive_API extends Base {
 			try {
 				$new_token = $this->client->fetchAccessTokenWithRefreshToken( $refresh_token );
 
-				if ( array_key_exists( 'error', $new_token ) ) {
+				if ( isset( $new_token['error'] ) ) {
 					return false;
 				}
 
-				update_option( 'wpmudev_drive_access_token', 'NEW TOKEN' );
-				update_option( 'wpmudev_drive_token_expires', 'NEW EXPIRATION TIME' );
+				// Merge old token with new parts to preserve refresh_token when not returned.
+				if ( empty( $new_token['refresh_token'] ) ) {
+					$new_token['refresh_token'] = $refresh_token;
+				}
+
+				update_option( 'wpmudev_drive_access_token', $new_token );
+
+				$created    = isset( $new_token['created'] ) ? (int) $new_token['created'] : time();
+				$expires_in = isset( $new_token['expires_in'] ) ? (int) $new_token['expires_in'] : 0;
+				$expires_at = $expires_in > 0 ? $created + $expires_in : ( time() + HOUR_IN_SECONDS );
+
+				update_option( 'wpmudev_drive_token_expires', $expires_at );
 
 				return true;
 			} catch ( \Exception $e ) {
@@ -395,8 +377,8 @@ class Drive_API extends Base {
 		}
 
 		try {
-			$page_size = 20;
-			$query     = 'trashed=false';
+			$page_size = 20; // This should be an input parameter not static value 20.
+			$query     = 'trashed=false'; // This should be an input parameter not static value.
 
 			$options = array(
 				'pageSize' => $page_size,
@@ -423,8 +405,7 @@ class Drive_API extends Base {
 				array(
 					'success' => true,
 					'files'   => $file_list,
-				),
-				200
+				)
 			);
 
 		} catch ( \Exception $e ) {
@@ -453,9 +434,11 @@ class Drive_API extends Base {
 		}
 
 		try {
+			// Create file metadata
 			$drive_file = new Google_Service_Drive_DriveFile();
 			$drive_file->setName( $file['name'] );
 
+			// Upload file
 			$result = $this->drive_service->files->create(
 				$drive_file,
 				array(
@@ -499,6 +482,7 @@ class Drive_API extends Base {
 		}
 
 		try {
+			// Get file metadata
 			$file = $this->drive_service->files->get(
 				$file_id,
 				array(
@@ -506,6 +490,7 @@ class Drive_API extends Base {
 				)
 			);
 
+			// Download file content
 			$response = $this->drive_service->files->get(
 				$file_id,
 				array(
@@ -515,6 +500,7 @@ class Drive_API extends Base {
 
 			$content = $response->getBody()->getContents();
 
+			// Return file content as base64 for JSON response
 			return new WP_REST_Response(
 				array(
 					'success'  => true,

@@ -1,6 +1,6 @@
 import { createRoot, render, StrictMode, useState, useEffect, createInterpolateElement } from '@wordpress/element';
 import { Button, TextControl, Spinner, Notice } from '@wordpress/components';
-import { __ } from '@wordpress/i18n';
+import { __, sprintf } from '@wordpress/i18n';
 import apiFetch from '@wordpress/api-fetch';
 
 import "./scss/style.scss"
@@ -21,58 +21,68 @@ const WPMUDEV_DriveTest = () => {
         clientSecret: ''
     });
 
+    // Keep the credentials form visibility in sync with current credentials state.
     useEffect(() => {
         setShowCredentials(!hasCredentials);
     }, [hasCredentials]);
 
+    // Handle OAuth redirect query params: ?auth=success or ?auth=failed (or ?error=...).
+    useEffect(() => {
+        try {
+            const url = new URL(window.location.href);
+            const auth = url.searchParams.get('auth');
+            const error = url.searchParams.get('error');
+
+            if (auth === 'success') {
+                setIsAuthenticated(true);
+                showNotice(__('Successfully authenticated with Google Drive.', 'wpmudev-plugin-test'), 'success');
+                // Clean the URL
+                window.history.replaceState(null, '', url.pathname + url.hash);
+            } else if (auth === 'failed') {
+                const msg = error ? decodeURIComponent(error) : __('Authentication failed. Please try again.', 'wpmudev-plugin-test');
+                showNotice(msg, 'error');
+                window.history.replaceState(null, '', url.pathname + url.hash);
+            }
+        } catch (e) {
+            // no-op
+        }
+    }, []);
+
     const showNotice = (message, type = 'success') => {
         setNotice({ message, type });
-        setTimeout(() => setNotice({ message: '', type: '' }), 5000);
+        setTimeout(() => setNotice({ message: '', type: '' }), 6000);
     };
 
-    const handleSaveCredentials = async () => {
-        const clientId = (credentials.clientId || '').trim();
-        const clientSecret = (credentials.clientSecret || '').trim();
+    // To be implemented in tasks 2.2+.
+    const handleSaveCredentials = async () => {};
 
-        if (!clientId || !clientSecret) {
-            showNotice(__('Please enter Client ID and Client Secret.', 'wpmudev-plugin-test'), 'error');
-            return;
-        }
-
+    // 2.3: Start OAuth 2.0 flow by requesting the consent URL and redirecting.
+    const handleAuth = async () => {
         setIsLoading(true);
         try {
-            const response = await apiFetch({
-                path: '/' + window.wpmudevDriveTest.restEndpointSave,
+            const result = await apiFetch({
+                path: '/' + window.wpmudevDriveTest.restEndpointAuth,
                 method: 'POST',
                 headers: {
                     'X-WP-Nonce': window.wpmudevDriveTest.nonce,
                 },
-                data: {
-                    client_id: clientId,
-                    client_secret: clientSecret,
-                },
             });
 
-            // Accept either boolean true or { success: true } payloads
-            const ok = response === true || (response && response.success);
-            if (!ok) {
-                const message = (response && (response.message || response.data?.message)) || __('Failed to save credentials.', 'wpmudev-plugin-test');
-                throw new Error(message);
+            const authUrl = result?.auth_url || result?.data?.auth_url;
+            if (!authUrl) {
+                throw new Error(__('Could not obtain authorization URL.', 'wpmudev-plugin-test'));
             }
 
-            setHasCredentials(true);
-            setShowCredentials(false);
-            setCredentials({ clientId: '', clientSecret: '' });
-            showNotice(__('Credentials saved successfully. You can now authenticate with Google Drive.', 'wpmudev-plugin-test'), 'success');
+            // Redirect the browser to Google's consent screen.
+            window.location.href = authUrl;
         } catch (err) {
-            showNotice(err?.message || __('Failed to save credentials. Please try again.', 'wpmudev-plugin-test'), 'error');
+            const msg = err?.message || __('Failed to initiate authentication.', 'wpmudev-plugin-test');
+            showNotice(msg, 'error');
         } finally {
             setIsLoading(false);
         }
     };
 
-    // Placeholders for next tasks
-    const handleAuth = async () => {};
     const loadFiles = async () => {};
     const handleUpload = async () => {};
     const handleDownload = async (fileId, fileName) => {};
@@ -205,7 +215,124 @@ const WPMUDEV_DriveTest = () => {
                 </div>
             ) : (
                 <>
-                    {/* Sections for later tasks */}
+                    {/* File Upload Section */}
+                    <div className="sui-box">
+                        <div className="sui-box-header">
+                            <h2 className="sui-box-title">{ __( 'Upload File to Drive', 'wpmudev-plugin-test' ) }</h2>
+                        </div>
+                        <div className="sui-box-body">
+                            <div className="sui-box-settings-row">
+                                <input
+                                    type="file"
+                                    onChange={(e) => setUploadFile(e.target.files[0])}
+                                    className="drive-file-input"
+                                    aria-label={ __( 'Select a file to upload to Google Drive', 'wpmudev-plugin-test' ) }
+                                />
+                                {uploadFile && (
+                                    <p>
+                                        <strong>{ __( 'Selected:', 'wpmudev-plugin-test' ) }</strong>{' '}
+                                        {uploadFile.name} ({ Math.round(uploadFile.size / 1024) } KB)
+                                    </p>
+                                )}
+                            </div>
+                        </div>
+                        <div className="sui-box-footer">
+                            <div className="sui-actions-right">
+                                <Button
+                                    variant="primary"
+                                    onClick={handleUpload}
+                                    disabled={isLoading || !uploadFile}
+                                    aria-label={ __( 'Upload the selected file to Google Drive', 'wpmudev-plugin-test' ) }
+                                >
+                                    {isLoading ? <Spinner /> : __( 'Upload to Drive', 'wpmudev-plugin-test' )}
+                                </Button>
+                            </div>
+                        </div>
+                    </div>
+
+                    {/* Create Folder Section */}
+                    <div className="sui-box">
+                        <div className="sui-box-header">
+                            <h2 className="sui-box-title">{ __( 'Create New Folder', 'wpmudev-plugin-test' ) }</h2>
+                        </div>
+                        <div className="sui-box-body">
+                            <div className="sui-box-settings-row">
+                                <TextControl
+                                    label={ __( 'Folder Name', 'wpmudev-plugin-test' ) }
+                                    value={folderName}
+                                    onChange={setFolderName}
+                                    placeholder={ __( 'Enter folder name', 'wpmudev-plugin-test' ) }
+                                />
+                            </div>
+                        </div>
+                        <div className="sui-box-footer">
+                            <div className="sui-actions-right">
+                                <Button
+                                    variant="secondary"
+                                    onClick={handleCreateFolder}
+                                    disabled={isLoading || !folderName.trim()}
+                                    aria-label={ __( 'Create a new folder in Google Drive', 'wpmudev-plugin-test' ) }
+                                >
+                                    {isLoading ? <Spinner /> : __( 'Create Folder', 'wpmudev-plugin-test' )}
+                                </Button>
+                            </div>
+                        </div>
+                    </div>
+
+                    {/* Files List Section */}
+                    <div className="sui-box">
+                        <div className="sui-box-header">
+                            <h2 className="sui-box-title">{ __( 'Your Drive Files', 'wpmudev-plugin-test' ) }</h2>
+                            <div className="sui-actions-right">
+                                <Button
+                                    variant="secondary"
+                                    onClick={loadFiles}
+                                    disabled={isLoading}
+                                    aria-label={ __( 'Refresh Google Drive files list', 'wpmudev-plugin-test' ) }
+                                >
+                                    {isLoading ? <Spinner /> : __( 'Refresh Files', 'wpmudev-plugin-test' )}
+                                </Button>
+                            </div>
+                        </div>
+                        <div className="sui-box-body">
+                            {isLoading ? (
+                                <div className="drive-loading">
+                                    <Spinner />
+                                    <p>{ __( 'Loading files...', 'wpmudev-plugin-test' ) }</p>
+                                </div>
+                            ) : files.length > 0 ? (
+                                <div className="drive-files-grid">
+                                    {files.map((file) => (
+                                        <div key={file.id} className="drive-file-item">
+                                            <div className="file-info">
+                                                <strong>{file.name}</strong>
+                                                <small>
+                                                    {file.modifiedTime ? new Date(file.modifiedTime).toLocaleDateString() : __( 'Unknown date', 'wpmudev-plugin-test' )}
+                                                </small>
+                                            </div>
+                                            <div className="file-actions">
+                                                {file.webViewLink && (
+                                                    <Button
+                                                        variant="link"
+                                                        size="small"
+                                                        href={file.webViewLink}
+                                                        target="_blank"
+                                                        aria-label={ __( 'Open in Google Drive', 'wpmudev-plugin-test' ) }
+                                                    >
+                                                        { __( 'View in Drive', 'wpmudev-plugin-test' ) }
+                                                    </Button>
+                                                )}
+                                            </div>
+                                        </div>
+                                    ))}
+                                </div>
+                            ) : (
+                                <div className="sui-box-settings-row">
+                                    <p>{ __( 'No files found in your Drive. Upload a file or create a folder to get started.', 'wpmudev-plugin-test' ) }</p>
+                                </div>
+                            )}
+                        </div>
+                    </div>
                 </>
             )}
         </>
