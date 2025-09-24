@@ -213,6 +213,11 @@ class Google_Drive extends Base {
 					$page_script['strategy']
 				);
 
+				// Make JS strings translatable.
+				if ( function_exists( 'wp_set_script_translations' ) ) {
+					wp_set_script_translations( $handle, 'wpmudev-plugin-test', plugin_dir_path( WPMUDEV_PLUGINTEST_PLUGIN_FILE ) . 'languages' );
+				}
+
 				if ( ! empty( $page_script['localize'] ) ) {
 					wp_localize_script( $handle, 'wpmudevDriveTest', $page_script['localize'] );
 				}
