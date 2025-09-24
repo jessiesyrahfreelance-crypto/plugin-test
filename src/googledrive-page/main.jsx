@@ -1,6 +1,7 @@
 import { createRoot, render, StrictMode, useState, useEffect, createInterpolateElement } from '@wordpress/element';
 import { Button, TextControl, Spinner, Notice } from '@wordpress/components';
-import { __, sprintf } from '@wordpress/i18n';
+import { __ } from '@wordpress/i18n';
+import apiFetch from '@wordpress/api-fetch';
 
 import "./scss/style.scss"
 
@@ -20,7 +21,6 @@ const WPMUDEV_DriveTest = () => {
         clientSecret: ''
     });
 
-    // Keep the credentials form visibility in sync with current credentials state.
     useEffect(() => {
         setShowCredentials(!hasCredentials);
     }, [hasCredentials]);
@@ -30,8 +30,48 @@ const WPMUDEV_DriveTest = () => {
         setTimeout(() => setNotice({ message: '', type: '' }), 5000);
     };
 
-    // To be implemented in tasks 2.2+.
-    const handleSaveCredentials = async () => {};
+    const handleSaveCredentials = async () => {
+        const clientId = (credentials.clientId || '').trim();
+        const clientSecret = (credentials.clientSecret || '').trim();
+
+        if (!clientId || !clientSecret) {
+            showNotice(__('Please enter Client ID and Client Secret.', 'wpmudev-plugin-test'), 'error');
+            return;
+        }
+
+        setIsLoading(true);
+        try {
+            const response = await apiFetch({
+                path: '/' + window.wpmudevDriveTest.restEndpointSave,
+                method: 'POST',
+                headers: {
+                    'X-WP-Nonce': window.wpmudevDriveTest.nonce,
+                },
+                data: {
+                    client_id: clientId,
+                    client_secret: clientSecret,
+                },
+            });
+
+            // Accept either boolean true or { success: true } payloads
+            const ok = response === true || (response && response.success);
+            if (!ok) {
+                const message = (response && (response.message || response.data?.message)) || __('Failed to save credentials.', 'wpmudev-plugin-test');
+                throw new Error(message);
+            }
+
+            setHasCredentials(true);
+            setShowCredentials(false);
+            setCredentials({ clientId: '', clientSecret: '' });
+            showNotice(__('Credentials saved successfully. You can now authenticate with Google Drive.', 'wpmudev-plugin-test'), 'success');
+        } catch (err) {
+            showNotice(err?.message || __('Failed to save credentials. Please try again.', 'wpmudev-plugin-test'), 'error');
+        } finally {
+            setIsLoading(false);
+        }
+    };
+
+    // Placeholders for next tasks
     const handleAuth = async () => {};
     const loadFiles = async () => {};
     const handleUpload = async () => {};
@@ -118,6 +158,7 @@ const WPMUDEV_DriveTest = () => {
                                 variant="primary"
                                 onClick={handleSaveCredentials}
                                 disabled={isLoading}
+                                aria-label={ __( 'Save Google Drive API credentials', 'wpmudev-plugin-test' ) }
                             >
                                 {isLoading ? <Spinner /> : __( 'Save Credentials', 'wpmudev-plugin-test' )}
                             </Button>
@@ -145,6 +186,7 @@ const WPMUDEV_DriveTest = () => {
                             <Button
                                 variant="secondary"
                                 onClick={() => setShowCredentials(true)}
+                                aria-label={ __( 'Change Google Drive API credentials', 'wpmudev-plugin-test' ) }
                             >
                                 { __( 'Change Credentials', 'wpmudev-plugin-test' ) }
                             </Button>
@@ -154,6 +196,7 @@ const WPMUDEV_DriveTest = () => {
                                 variant="primary"
                                 onClick={handleAuth}
                                 disabled={isLoading}
+                                aria-label={ __( 'Start Google Drive authentication', 'wpmudev-plugin-test' ) }
                             >
                                 {isLoading ? <Spinner /> : __( 'Authenticate with Google Drive', 'wpmudev-plugin-test' )}
                             </Button>
@@ -162,120 +205,7 @@ const WPMUDEV_DriveTest = () => {
                 </div>
             ) : (
                 <>
-                    {/* File Upload Section */}
-                    <div className="sui-box">
-                        <div className="sui-box-header">
-                            <h2 className="sui-box-title">{ __( 'Upload File to Drive', 'wpmudev-plugin-test' ) }</h2>
-                        </div>
-                        <div className="sui-box-body">
-                            <div className="sui-box-settings-row">
-                                <input
-                                    type="file"
-                                    onChange={(e) => setUploadFile(e.target.files[0])}
-                                    className="drive-file-input"
-                                    aria-label={ __( 'Select a file to upload to Google Drive', 'wpmudev-plugin-test' ) }
-                                />
-                                {uploadFile && (
-                                    <p>
-                                        <strong>{ __( 'Selected:', 'wpmudev-plugin-test' ) }</strong>{' '}
-                                        {uploadFile.name} ({ Math.round(uploadFile.size / 1024) } KB)
-                                    </p>
-                                )}
-                            </div>
-                        </div>
-                        <div className="sui-box-footer">
-                            <div className="sui-actions-right">
-                                <Button
-                                    variant="primary"
-                                    onClick={handleUpload}
-                                    disabled={isLoading || !uploadFile}
-                                >
-                                    {isLoading ? <Spinner /> : __( 'Upload to Drive', 'wpmudev-plugin-test' )}
-                                </Button>
-                            </div>
-                        </div>
-                    </div>
-
-                    {/* Create Folder Section */}
-                    <div className="sui-box">
-                        <div className="sui-box-header">
-                            <h2 className="sui-box-title">{ __( 'Create New Folder', 'wpmudev-plugin-test' ) }</h2>
-                        </div>
-                        <div className="sui-box-body">
-                            <div className="sui-box-settings-row">
-                                <TextControl
-                                    label={ __( 'Folder Name', 'wpmudev-plugin-test' ) }
-                                    value={folderName}
-                                    onChange={setFolderName}
-                                    placeholder={ __( 'Enter folder name', 'wpmudev-plugin-test' ) }
-                                />
-                            </div>
-                        </div>
-                        <div className="sui-box-footer">
-                            <div className="sui-actions-right">
-                                <Button
-                                    variant="secondary"
-                                    onClick={handleCreateFolder}
-                                    disabled={isLoading || !folderName.trim()}
-                                >
-                                    {isLoading ? <Spinner /> : __( 'Create Folder', 'wpmudev-plugin-test' )}
-                                </Button>
-                            </div>
-                        </div>
-                    </div>
-
-                    {/* Files List Section */}
-                    <div className="sui-box">
-                        <div className="sui-box-header">
-                            <h2 className="sui-box-title">{ __( 'Your Drive Files', 'wpmudev-plugin-test' ) }</h2>
-                            <div className="sui-actions-right">
-                                <Button
-                                    variant="secondary"
-                                    onClick={loadFiles}
-                                    disabled={isLoading}
-                                >
-                                    {isLoading ? <Spinner /> : __( 'Refresh Files', 'wpmudev-plugin-test' )}
-                                </Button>
-                            </div>
-                        </div>
-                        <div className="sui-box-body">
-                            {isLoading ? (
-                                <div className="drive-loading">
-                                    <Spinner />
-                                    <p>{ __( 'Loading files...', 'wpmudev-plugin-test' ) }</p>
-                                </div>
-                            ) : files.length > 0 ? (
-                                <div className="drive-files-grid">
-                                    {files.map((file) => (
-                                        <div key={file.id} className="drive-file-item">
-                                            <div className="file-info">
-                                                <strong>{file.name}</strong>
-                                                <small>
-                                                    {file.modifiedTime ? new Date(file.modifiedTime).toLocaleDateString() : __( 'Unknown date', 'wpmudev-plugin-test' )}
-                                                </small>
-                                            </div>
-                                            <div className="file-actions">
-                                                {file.webViewLink && (
-                                                    <Button
-                                                        variant="link"
-                                                        size="small"
-                                                        href={file.webViewLink}
-                                                        target="_blank"
-                                                    >
-                                                        { __( 'View in Drive', 'wpmudev-plugin-test' ) }
-                                                    </Button>
-                                                )}
-                                            </div>
-                                        </div>
-                                    ))}
-                                </div>
-                            ) : (
-                                <div className="sui-box-settings-row">
-                                    <p>{ __( 'No files found in your Drive. Upload a file or create a folder to get started.', 'wpmudev-plugin-test' ) }</p>
-                                </div>
-                            )}
-                        </div>
-                    </div>
+                    {/* Sections for later tasks */}
                 </>
             )}
         </>

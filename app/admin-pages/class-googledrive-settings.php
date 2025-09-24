@@ -91,7 +91,7 @@ class Google_Drive extends Base {
 
 	public function register_admin_page() {
 		$page = add_menu_page(
-			'Google Drive Test',
+			$this->page_title, // Make page title translatable.
 			$this->page_title,
 			'manage_options',
 			$this->page_slug,
@@ -165,7 +165,7 @@ class Google_Drive extends Base {
 	private function get_auth_status() {
 		$access_token = get_option( 'wpmudev_drive_access_token', '' );
 		$expires_at   = get_option( 'wpmudev_drive_token_expires', 0 );
-		
+
 		return ! empty( $access_token ) && time() < $expires_at;
 	}
 
@@ -254,7 +254,7 @@ class Google_Drive extends Base {
 
 		$current_screen = get_current_screen();
 
-		if ( empty( $current_screen->id ) || ! strpos( $current_screen->id, $this->page_slug ) ) {
+		if ( empty( $current_screen->id ) || false === strpos( $current_screen->id, $this->page_slug ) ) {
 			return $classes;
 		}
 
