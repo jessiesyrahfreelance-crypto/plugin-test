@@ -135,6 +135,11 @@ class Google_Drive extends Base {
 				'wp-polyfill',
 			);
 
+		$has_secret = (
+			( ! empty( $this->creds['client_secret'] ) ) ||
+			( ! empty( $this->creds['client_secret_enc'] ) )
+		);
+
 		$this->page_scripts[ $handle ] = array(
 			'src'       => $src,
 			'style_src' => $style_src,
@@ -152,7 +157,7 @@ class Google_Drive extends Base {
 				'nonce'                => wp_create_nonce( 'wp_rest' ),
 				'authStatus'           => $this->get_auth_status(),
 				'redirectUri'          => home_url( '/wp-json/wpmudev/v1/drive/callback' ),
-				'hasCredentials'       => ! empty( $this->creds['client_id'] ) && ! empty( $this->creds['client_secret'] ),
+				'hasCredentials'       => ! empty( $this->creds['client_id'] ) && $has_secret,
 			),
 		);
 	}

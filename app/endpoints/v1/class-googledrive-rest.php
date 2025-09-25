@@ -27,6 +27,13 @@ use Google_Service_Drive_DriveFile;
 class Drive_API extends Base {
 
 	/**
+	 * Credentials option name.
+	 *
+	 * @var string
+	 */
+	private $creds_option = 'wpmudev_plugin_tests_auth';
+
+	/**
 	 * Google Client instance.
 	 *
 	 * @var Google_Client
@@ -58,6 +65,12 @@ class Drive_API extends Base {
 	);
 
 	/**
+	 * Encryption config.
+	 */
+	private const ENC_METHOD   = 'aes-256-cbc';
+	private const CRED_VERSION = 2;
+
+	/**
 	 * Initialize the class.
 	 */
 	public function init() {
@@ -68,18 +81,106 @@ class Drive_API extends Base {
 	}
 
 	/**
+	 * Derive a symmetric key from WP salts.
+	 *
+	 * @return string 32-byte binary key.
+	 */
+	private function get_encryption_key() {
+		$material = (string) ( defined( 'AUTH_KEY' ) ? AUTH_KEY : '' )
+			. ( defined( 'SECURE_AUTH_KEY' ) ? SECURE_AUTH_KEY : '' )
+			. ( defined( 'LOGGED_IN_KEY' ) ? LOGGED_IN_KEY : '' )
+			. ( defined( 'NONCE_KEY' ) ? NONCE_KEY : '' );
+
+		return hash( 'sha256', $material, true );
+	}
+
+	/**
+	 * Encrypt a value.
+	 *
+	 * @param string $plain Plain text.
+	 * @return string Base64 JSON payload or empty string on failure.
+	 */
+	private function encrypt_secret( $plain ) {
+		$plain = (string) $plain;
+		if ( '' === $plain ) {
+			return '';
+		}
+		$ivlen  = openssl_cipher_iv_length( self::ENC_METHOD );
+		$iv     = random_bytes( $ivlen );
+		$cipher = openssl_encrypt( $plain, self::ENC_METHOD, $this->get_encryption_key(), OPENSSL_RAW_DATA, $iv );
+		if ( false === $cipher ) {
+			return '';
+		}
+		$payload = array(
+			'v' => self::CRED_VERSION,
+			'i' => base64_encode( $iv ),
+			'c' => base64_encode( $cipher ),
+		);
+
+		return base64_encode( wp_json_encode( $payload ) );
+	}
+
+	/**
+	 * Decrypt an encrypted value.
+	 *
+	 * @param string $encoded Base64 JSON payload.
+	 * @return string Decrypted plain text or empty string.
+	 */
+	private function decrypt_secret( $encoded ) {
+		$encoded = (string) $encoded;
+		if ( '' === $encoded ) {
+			return '';
+		}
+		$json = base64_decode( $encoded, true );
+		if ( false === $json ) {
+			return '';
+		}
+		$payload = json_decode( $json, true );
+		if ( empty( $payload['i'] ) || empty( $payload['c'] ) ) {
+			return '';
+		}
+		$iv     = base64_decode( $payload['i'], true );
+		$cipher = base64_decode( $payload['c'], true );
+		if ( false === $iv || false === $cipher ) {
+			return '';
+		}
+		$plain = openssl_decrypt( $cipher, self::ENC_METHOD, $this->get_encryption_key(), OPENSSL_RAW_DATA, $iv );
+
+		return ( false === $plain ) ? '' : $plain;
+	}
+
+	/**
 	 * Setup Google Client.
 	 */
 	private function setup_google_client() {
-		$auth_creds = get_option( 'wpmudev_plugin_tests_auth', array() );
+		$auth_creds = get_option( $this->creds_option, array() );
 
-		if ( empty( $auth_creds['client_id'] ) || empty( $auth_creds['client_secret'] ) ) {
+		if ( empty( $auth_creds ) || empty( $auth_creds['client_id'] ) ) {
+			return;
+		}
+
+		$client_id     = (string) $auth_creds['client_id'];
+		$client_secret = '';
+
+		// Prefer encrypted secret. Migrate plaintext if present.
+		if ( ! empty( $auth_creds['client_secret_enc'] ) ) {
+			$client_secret = $this->decrypt_secret( $auth_creds['client_secret_enc'] );
+		} elseif ( ! empty( $auth_creds['client_secret'] ) ) {
+			$client_secret = (string) $auth_creds['client_secret'];
+
+			// Migrate to encrypted storage.
+			$auth_creds['client_secret_enc'] = $this->encrypt_secret( $client_secret );
+			unset( $auth_creds['client_secret'] );
+			update_option( $this->creds_option, $auth_creds );
+		}
+
+		if ( '' === $client_id || '' === $client_secret ) {
 			return;
 		}
 
 		$this->client = new Google_Client();
-		$this->client->setClientId( $auth_creds['client_id'] );
-		$this->client->setClientSecret( $auth_creds['client_secret'] );
+		$this->client->setClientId( $client_id );
+		$this->client->setClientSecret( $client_secret );
 		$this->client->setRedirectUri( $this->redirect_uri );
 		$this->client->setScopes( $this->scopes );
 		$this->client->setAccessType( 'offline' );
@@ -108,6 +209,33 @@ class Drive_API extends Base {
 				'permission_callback' => function () {
 					return current_user_can( 'manage_options' );
 				},
+				'args'                => array(
+					'client_id' => array(
+						'type'              => 'string',
+						'required'          => true,
+						'validate_callback' => function ( $param ) {
+							$param = trim( (string) $param );
+							// Typical Google OAuth Web client ID format: <alnum-and-dashes>.apps.googleusercontent.com
+							return (bool) preg_match( '/^[0-9a-z\-]+\.apps\.googleusercontent\.com$/i', $param );
+						},
+						'sanitize_callback' => function ( $param ) {
+							return trim( (string) $param );
+						},
+					),
+					'client_secret' => array(
+						'type'              => 'string',
+						'required'          => true,
+						'validate_callback' => function ( $param ) {
+							$param = trim( (string) $param );
+							// Keep this generic; secrets vary in format. Minimum length sanity check.
+							return ( is_string( $param ) && strlen( $param ) >= 8 );
+						},
+						'sanitize_callback' => function ( $param ) {
+							// Do NOT over-sanitize secrets; only trim to preserve content.
+							return trim( (string) $param );
+						},
+					),
+				),
 			)
 		);
 
@@ -188,23 +316,53 @@ class Drive_API extends Base {
 	}
 
 	/**
-	 * Save Google OAuth credentials.
+	 * Save Google OAuth credentials (securely).
+	 *
+	 * @param WP_REST_Request $request Request instance.
+	 * @return WP_REST_Response|WP_Error
 	 */
 	public function save_credentials( WP_REST_Request $request ) {
-		$client_id     = sanitize_text_field( (string) $request->get_param( 'client_id' ) );
-		$client_secret = sanitize_text_field( (string) $request->get_param( 'client_secret' ) );
+		// The args validators and sanitizers have already run, but re-check defensively.
+		$client_id     = trim( (string) $request->get_param( 'client_id' ) );
+		$client_secret = trim( (string) $request->get_param( 'client_secret' ) );
 
 		if ( '' === $client_id || '' === $client_secret ) {
-			return new WP_Error( 'missing_params', __( 'Client ID and Client Secret are required.', 'wpmudev-plugin-test' ), array( 'status' => 400 ) );
+			return new WP_Error(
+				'missing_params',
+				__( 'Client ID and Client Secret are required.', 'wpmudev-plugin-test' ),
+				array( 'status' => 400 )
+			);
 		}
 
-		update_option(
-			'wpmudev_plugin_tests_auth',
-			array(
-				'client_id'     => $client_id,
-				'client_secret' => $client_secret,
-			)
+		if ( ! preg_match( '/\.apps\.googleusercontent\.com$/i', $client_id ) ) {
+			return new WP_Error(
+				'invalid_client_id',
+				__( 'The provided Client ID is not valid.', 'wpmudev-plugin-test' ),
+				array( 'status' => 400 )
+			);
+		}
+
+		$encrypted = $this->encrypt_secret( $client_secret );
+		if ( '' === $encrypted ) {
+			return new WP_Error(
+				'encryption_failed',
+				__( 'Failed to securely store the client secret.', 'wpmudev-plugin-test' ),
+				array( 'status' => 500 )
+			);
+		}
+
+		$payload = array(
+			'version'           => self::CRED_VERSION,
+			'client_id'         => $client_id,
+			'client_secret_enc' => $encrypted,
 		);
+
+		// Prefer add_option with autoload=no on first save; otherwise update_option.
+		if ( false === get_option( $this->creds_option, false ) ) {
+			add_option( $this->creds_option, $payload, '', 'no' );
+		} else {
+			update_option( $this->creds_option, $payload );
+		}
 
 		// Reinitialize Google Client with new credentials
 		$this->setup_google_client();
@@ -212,7 +370,8 @@ class Drive_API extends Base {
 		return new WP_REST_Response(
 			array(
 				'success' => true,
-				'message' => __( 'Credentials saved.', 'wpmudev-plugin-test' ),
+				'code'    => 'credentials_saved',
+				'message' => __( 'Credentials saved securely.', 'wpmudev-plugin-test' ),
 			),
 			200
 		);
@@ -238,8 +397,6 @@ class Drive_API extends Base {
 			$this->client->setState( $state );
 
 			$auth_url = $this->client->createAuthUrl();
-
-			error_log('Drive Auth URL: ' . $auth_url);
 
 			return new WP_REST_Response(
 				array(
@@ -372,37 +529,40 @@ class Drive_API extends Base {
 
 	/**
 	 * List files in Google Drive.
+	 *
+	 * @param WP_REST_Request $request Request.
+	 * @return WP_REST_Response|WP_Error
 	 */
-	public function list_files() {
+	public function list_files( WP_REST_Request $request ) {
 		if ( ! $this->ensure_valid_token() ) {
 			return new WP_Error( 'no_access_token', __( 'Not authenticated with Google Drive', 'wpmudev-plugin-test' ), array( 'status' => 401 ) );
 		}
 
 		try {
-			$page_size  = (int) $request->get_param( 'pageSize' );
-            if ( $page_size <= 0 ) {
-                $page_size = 20;
-            }
-            if ( $page_size > 100 ) {
-                $page_size = 100; // Drive API max is 1000, but keep UI lighter.
-            }
-            $page_token = sanitize_text_field( (string) $request->get_param( 'pageToken' ) );
-            $query      = sanitize_text_field( (string) $request->get_param( 'q' ) );
-            if ( '' === $query ) {
-                $query = 'trashed=false';
-            }
- 
-            $options = array(
-                'pageSize' => $page_size,
-                'q'        => $query,
-                'fields'   => 'nextPageToken, files(id,name,mimeType,size,modifiedTime,webViewLink,iconLink)',
-                'orderBy'  => 'modifiedTime desc',
-            );
-            if ( ! empty( $page_token ) ) {
-                $options['pageToken'] = $page_token;
-            }
- 
-            $results = $this->drive_service->files->listFiles( $options );
+			$page_size = (int) $request->get_param( 'pageSize' );
+			if ( $page_size <= 0 ) {
+				$page_size = 20;
+			}
+			if ( $page_size > 100 ) {
+				$page_size = 100;
+			}
+			$page_token = sanitize_text_field( (string) $request->get_param( 'pageToken' ) );
+			$query      = sanitize_text_field( (string) $request->get_param( 'q' ) );
+			if ( '' === $query ) {
+				$query = 'trashed=false';
+			}
+
+			$options = array(
+				'pageSize' => $page_size,
+				'q'        => $query,
+				'fields'   => 'nextPageToken, files(id,name,mimeType,size,modifiedTime,webViewLink,iconLink)',
+				'orderBy'  => 'modifiedTime desc',
+			);
+			if ( ! empty( $page_token ) ) {
+				$options['pageToken'] = $page_token;
+			}
+
+			$results = $this->drive_service->files->listFiles( $options );
 			$files   = $results->getFiles();
 
 			$file_list = array();
@@ -420,9 +580,9 @@ class Drive_API extends Base {
 
 			return new WP_REST_Response(
 				array(
-					'success'      => true,
-                    'files'        => $file_list,
-                    'nextPageToken'=> $results->getNextPageToken(),
+					'success'       => true,
+					'files'         => $file_list,
+					'nextPageToken' => $results->getNextPageToken(),
 				)
 			);
 
