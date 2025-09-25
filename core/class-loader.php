@@ -96,5 +96,11 @@ final class Loader extends Base {
 		Endpoints\V1\Drive_API::instance()->init();
 		App\Admin_Pages\Posts_Maintenance::instance()->init();
 		Endpoints\V1\Posts_Maintenance_API::instance()->init();
+
+		// Register WP-CLI command (if in CLI).
+		if ( defined( 'WP_CLI' ) && WP_CLI ) {
+			// Lazy-load class via Composer classmap.
+			App\CLI\Posts_Maintenance_CLI::register();
+		}
 	}
 }
