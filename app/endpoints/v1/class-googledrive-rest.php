@@ -71,6 +71,11 @@ class Drive_API extends Base {
 	private const CRED_VERSION = 2;
 
 	/**
+	 * Default max upload size for this plugin (25MB).
+	 */
+	private const DEFAULT_MAX_UPLOAD_BYTES = 26214400; // 25 * 1024 * 1024
+
+	/**
 	 * Initialize the class.
 	 */
 	public function init() {
@@ -322,6 +327,18 @@ class Drive_API extends Base {
 				'permission_callback' => function () {
 					return current_user_can( 'manage_options' );
 				},
+				'args'                => array(
+					'parentId' => array(
+						'type'              => 'string',
+						'required'          => false,
+						'sanitize_callback' => function ( $param ) {
+							return sanitize_text_field( (string) $param );
+						},
+						'validate_callback' => function ( $param ) {
+							return '' === $param || (bool) preg_match( '/^[a-zA-Z0-9\-_]+$/', (string) $param );
+						},
+					),
+				),
 			)
 		);
 
@@ -596,14 +613,10 @@ class Drive_API extends Base {
 			$parent_id  = sanitize_text_field( (string) $request->get_param( 'parentId' ) );
 
 			// Build the Drive query:
-			// Priority: if user provides q explicitly, use it as-is (sanitized).
-			// Else, if parentId provided and looks valid, list that folder's children.
-			// Else, default to trashed=false.
 			$query = '';
 			if ( '' !== $user_q ) {
 				$query = $user_q;
 			} elseif ( '' !== $parent_id && preg_match( '/^[a-zA-Z0-9\-_]+$/', $parent_id ) ) {
-				// phpcs:ignore WordPress.WP.AlternativeFunctions.strip_tags_strip_tags
 				$query = sprintf( '\'%s\' in parents and trashed=false', $parent_id );
 			} else {
 				$query = 'trashed=false';
@@ -646,7 +659,6 @@ class Drive_API extends Base {
 			);
 
 		} catch ( \Google\Service\Exception $ge ) {
-			// Google API specific error.
 			$message = $ge->getMessage();
 			return new WP_Error( 'google_api_error', $message, array( 'status' => 502 ) );
 		} catch ( \Exception $e ) {
@@ -655,7 +667,99 @@ class Drive_API extends Base {
 	}
 
 	/**
+	 * Get plugin-allowed mime types.
+	 *
+	 * Filter: wpmudev_drive_allowed_mime_types to customize.
+	 *
+	 * @return array Allowed mime types list.
+	 */
+	private function get_allowed_mime_types() {
+		$allowed = array(
+			// Images
+			'image/jpeg',
+			'image/png',
+			'image/gif',
+			'image/webp',
+			'image/svg+xml',
+			// Documents
+			'application/pdf',
+			'text/plain',
+			'text/csv',
+			'application/msword',
+			'application/vnd.openxmlformats-officedocument.wordprocessingml.document',
+			'application/vnd.ms-excel',
+			'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet',
+			'application/vnd.ms-powerpoint',
+			'application/vnd.openxmlformats-officedocument.presentationml.presentation',
+			'application/rtf',
+			'application/json',
+			// Archives
+			'application/zip',
+			'application/x-zip-compressed',
+			// Media
+			'video/mp4',
+			'audio/mpeg',
+		);
+
+		/**
+		 * Allow customization of allowed mime types for Drive uploads.
+		 *
+		 * @param array $allowed
+		 */
+		$allowed = apply_filters( 'wpmudev_drive_allowed_mime_types', $allowed );
+
+		// Ensure array of unique, non-empty strings.
+		return array_values( array_filter( array_unique( array_map( 'strval', (array) $allowed ) ) ) );
+	}
+
+	/**
+	 * Compute maximum allowed upload size in bytes.
+	 *
+	 * Uses the minimum of WordPress/site/server limit and plugin's default cap.
+	 *
+	 * @return int
+	 */
+	private function get_max_upload_bytes() {
+		$wp_limit = (int) wp_max_upload_size(); // honors upload_max_filesize/post_max_size
+		$plugin_cap = (int) apply_filters( 'wpmudev_drive_max_upload_bytes', self::DEFAULT_MAX_UPLOAD_BYTES );
+
+		$limit = $wp_limit > 0 ? min( $wp_limit, $plugin_cap ) : $plugin_cap;
+
+		return max( 1, (int) $limit );
+	}
+
+	/**
+	 * Map PHP upload error code to human-friendly message.
+	 *
+	 * @param int $code
+	 * @return string
+	 */
+	private function map_upload_error( $code ) {
+		switch ( (int) $code ) {
+			case UPLOAD_ERR_INI_SIZE:
+			case UPLOAD_ERR_FORM_SIZE:
+				return __( 'The uploaded file exceeds the maximum allowed size.', 'wpmudev-plugin-test' );
+			case UPLOAD_ERR_PARTIAL:
+				return __( 'The uploaded file was only partially uploaded.', 'wpmudev-plugin-test' );
+			case UPLOAD_ERR_NO_FILE:
+				return __( 'No file was uploaded.', 'wpmudev-plugin-test' );
+			case UPLOAD_ERR_NO_TMP_DIR:
+				return __( 'Missing a temporary folder on the server.', 'wpmudev-plugin-test' );
+			case UPLOAD_ERR_CANT_WRITE:
+				return __( 'Failed to write file to disk.', 'wpmudev-plugin-test' );
+			case UPLOAD_ERR_EXTENSION:
+				return __( 'A PHP extension stopped the file upload.', 'wpmudev-plugin-test' );
+			default:
+				return __( 'File upload error.', 'wpmudev-plugin-test' );
+		}
+	}
+
+	/**
 	 * Upload file to Google Drive.
+	 *
+	 * Accepts multipart/form-data with:
+	 * - file: the uploaded file
+	 * - parentId (optional): Drive folder ID to upload into
 	 */
 	public function upload_file( WP_REST_Request $request ) {
 		if ( ! $this->ensure_valid_token() ) {
@@ -670,41 +774,152 @@ class Drive_API extends Base {
 
 		$file = $files['file'];
 
-		if ( $file['error'] !== UPLOAD_ERR_OK ) {
-			return new WP_Error( 'upload_error', __( 'File upload error', 'wpmudev-plugin-test' ), array( 'status' => 400 ) );
+		// Handle PHP upload errors explicitly.
+		if ( (int) $file['error'] !== UPLOAD_ERR_OK ) {
+			return new WP_Error( 'upload_error', $this->map_upload_error( (int) $file['error'] ), array( 'status' => 400 ) );
+		}
+
+		$tmp_path = (string) $file['tmp_name'];
+		$orig_name = (string) $file['name'];
+		$size      = (int) $file['size'];
+		$client_mime = (string) $file['type'];
+
+		// Basic security checks.
+		if ( empty( $tmp_path ) || ! is_uploaded_file( $tmp_path ) || ! file_exists( $tmp_path ) ) {
+			return new WP_Error( 'invalid_upload', __( 'Invalid uploaded file.', 'wpmudev-plugin-test' ), array( 'status' => 400 ) );
+		}
+
+		// Validate size against limits.
+		$max_bytes = $this->get_max_upload_bytes();
+		if ( $size <= 0 || $size > $max_bytes ) {
+			return new WP_Error(
+				'file_too_large',
+				sprintf(
+					/* translators: %s: human readable size */
+					__( 'File exceeds the maximum allowed size of %s.', 'wpmudev-plugin-test' ),
+					size_format( $max_bytes )
+				),
+				array( 'status' => 400 )
+			);
+		}
+
+		// Sanitize file name.
+		$sanitized_name = sanitize_file_name( $orig_name );
+
+		// Validate file type using WP and finfo.
+		$wp_type = wp_check_filetype_and_ext( $tmp_path, $sanitized_name );
+		$ext     = isset( $wp_type['ext'] ) ? (string) $wp_type['ext'] : '';
+		$detected_mime = isset( $wp_type['type'] ) ? (string) $wp_type['type'] : '';
+
+		// Use finfo as a secondary check when available.
+		if ( function_exists( 'finfo_open' ) ) {
+			$finfo = finfo_open( FILEINFO_MIME_TYPE );
+			if ( $finfo ) {
+				$finfo_mime = finfo_file( $finfo, $tmp_path );
+				if ( is_string( $finfo_mime ) && '' !== $finfo_mime ) {
+					$detected_mime = $finfo_mime;
+				}
+				finfo_close( $finfo );
+			}
+		}
+
+		// Final mime to use: prefer detected_mime, fallback to client provided.
+		$final_mime = $detected_mime ?: ( $client_mime ?: 'application/octet-stream' );
+
+		$allowed_mimes = $this->get_allowed_mime_types();
+
+		// Disallow clearly dangerous types regardless of allowed list.
+		$blocked_ext = array( 'php', 'phtml', 'phar', 'cgi', 'pl', 'exe', 'sh', 'bat', 'cmd', 'js', 'jsp', 'asp', 'aspx' );
+		if ( in_array( strtolower( (string) $ext ), $blocked_ext, true ) ) {
+			return new WP_Error( 'forbidden_type', __( 'This file type is not allowed.', 'wpmudev-plugin-test' ), array( 'status' => 400 ) );
+		}
+
+		// If we have an allow-list, enforce it (but allow unknown types to be filtered in).
+		if ( ! empty( $allowed_mimes ) && ! in_array( $final_mime, $allowed_mimes, true ) ) {
+			return new WP_Error(
+				'unsupported_type',
+				sprintf(
+					/* translators: 1: mime type */
+					__( 'Unsupported file type: %s', 'wpmudev-plugin-test' ),
+					esc_html( $final_mime )
+				),
+				array( 'status' => 400 )
+			);
+		}
+
+		// Optional: parent folder.
+		$parent_id = sanitize_text_field( (string) $request->get_param( 'parentId' ) );
+		if ( '' !== $parent_id && ! preg_match( '/^[a-zA-Z0-9\-_]+$/', $parent_id ) ) {
+			return new WP_Error( 'invalid_parent', __( 'Invalid parent folder ID.', 'wpmudev-plugin-test' ), array( 'status' => 400 ) );
 		}
 
 		try {
-			// Create file metadata
+			// Prepare Drive file metadata.
 			$drive_file = new Google_Service_Drive_DriveFile();
-			$drive_file->setName( $file['name'] );
+			$drive_file->setName( $sanitized_name );
+			if ( '' !== $parent_id ) {
+				$drive_file->setParents( array( $parent_id ) );
+			}
 
-			// Upload file
+			// Read content and upload using multipart.
+			$contents = file_get_contents( $tmp_path );
+			if ( false === $contents ) {
+				return new WP_Error( 'read_failed', __( 'Failed to read uploaded file.', 'wpmudev-plugin-test' ), array( 'status' => 500 ) );
+			}
+
 			$result = $this->drive_service->files->create(
 				$drive_file,
 				array(
-					'data'       => file_get_contents( $file['tmp_name'] ),
-					'mimeType'   => $file['type'],
+					'data'       => $contents,
+					'mimeType'   => $final_mime,
 					'uploadType' => 'multipart',
-					'fields'     => 'id,name,mimeType,size,webViewLink',
+					'fields'     => 'id,name,mimeType,size,webViewLink,parents',
 				)
 			);
 
+			// Best-effort cleanup (PHP usually cleans tmp automatically).
+			@unlink( $tmp_path ); // phpcs:ignore WordPress.PHP.NoSilencedErrors.Discouraged
+
+			// Build response with completion status.
+			$total_bytes = (int) $size;
+			$uploaded_bytes = $total_bytes; // As this is a single request, it's fully uploaded on success.
+
 			return new WP_REST_Response(
 				array(
-					'success' => true,
-					'file'    => array(
+					'success'         => true,
+					'message'         => __( 'File uploaded successfully.', 'wpmudev-plugin-test' ),
+					'progress'        => 100,
+					'bytesUploaded'   => $uploaded_bytes,
+					'totalBytes'      => $total_bytes,
+					'file'            => array(
 						'id'          => $result->getId(),
 						'name'        => $result->getName(),
 						'mimeType'    => $result->getMimeType(),
 						'size'        => $result->getSize(),
 						'webViewLink' => $result->getWebViewLink(),
+						'parents'     => method_exists( $result, 'getParents' ) ? $result->getParents() : array(),
 					),
 				),
 				200
 			);
 
+		} catch ( \Google\Service\Exception $ge ) {
+			// Try to provide clearer error context from Google API.
+			$message = $ge->getMessage();
+			$code    = $ge->getCode() ?: 500;
+
+			// Best-effort cleanup.
+			if ( file_exists( $tmp_path ) ) {
+				@unlink( $tmp_path ); // phpcs:ignore WordPress.PHP.NoSilencedErrors.Discouraged
+			}
+
+			return new WP_Error( 'google_upload_error', $message, array( 'status' => ( $code >= 400 && $code < 600 ) ? $code : 502 ) );
 		} catch ( \Exception $e ) {
+			// Cleanup temp file.
+			if ( file_exists( $tmp_path ) ) {
+				@unlink( $tmp_path ); // phpcs:ignore WordPress.PHP.NoSilencedErrors.Discouraged
+			}
+
 			return new WP_Error( 'upload_failed', $e->getMessage(), array( 'status' => 500 ) );
 		}
 	}
