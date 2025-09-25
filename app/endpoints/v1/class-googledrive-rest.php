@@ -262,7 +262,7 @@ class Drive_API extends Base {
 			)
 		);
 
-		// List files
+		// List files (Files List API) with validated args.
 		register_rest_route(
 			'wpmudev/v1/drive',
 			'/files',
@@ -272,6 +272,43 @@ class Drive_API extends Base {
 				'permission_callback' => function () {
 					return current_user_can( 'manage_options' );
 				},
+				'args'                => array(
+					'pageSize' => array(
+						'type'              => 'integer',
+						'required'          => false,
+						'sanitize_callback' => 'absint',
+						'validate_callback' => function ( $param ) {
+							$param = absint( $param );
+							return $param >= 1 && $param <= 100;
+						},
+					),
+					'pageToken' => array(
+						'type'              => 'string',
+						'required'          => false,
+						'sanitize_callback' => function ( $param ) {
+							return sanitize_text_field( (string) $param );
+						},
+					),
+					'q' => array(
+						'type'              => 'string',
+						'required'          => false,
+						'sanitize_callback' => function ( $param ) {
+							// Keep user-provided query text safe; Drive API will handle syntax.
+							return sanitize_text_field( (string) $param );
+						},
+					),
+					'parentId' => array(
+						'type'              => 'string',
+						'required'          => false,
+						'sanitize_callback' => function ( $param ) {
+							return sanitize_text_field( (string) $param );
+						},
+						'validate_callback' => function ( $param ) {
+							// Drive file IDs typically consist of letters, numbers, dash, underscore.
+							return '' === $param || (bool) preg_match( '/^[a-zA-Z0-9\-_]+$/', (string) $param );
+						},
+					),
+				),
 			)
 		);
 
@@ -528,7 +565,14 @@ class Drive_API extends Base {
 	}
 
 	/**
-	 * List files in Google Drive.
+	 * Files List API
+	 * Fetch Google Drive files with pagination and optional parent filtering.
+	 *
+	 * Query parameters:
+	 * - pageSize (int, 1..100)   : Number of items per page (default 20).
+	 * - pageToken (string)       : Token for the next page.
+	 * - q (string)               : Custom Drive query (overrides defaults if provided).
+	 * - parentId (string)        : Folder ID to list its children.
 	 *
 	 * @param WP_REST_Request $request Request.
 	 * @return WP_REST_Response|WP_Error
@@ -546,9 +590,22 @@ class Drive_API extends Base {
 			if ( $page_size > 100 ) {
 				$page_size = 100;
 			}
+
 			$page_token = sanitize_text_field( (string) $request->get_param( 'pageToken' ) );
-			$query      = sanitize_text_field( (string) $request->get_param( 'q' ) );
-			if ( '' === $query ) {
+			$user_q     = sanitize_text_field( (string) $request->get_param( 'q' ) );
+			$parent_id  = sanitize_text_field( (string) $request->get_param( 'parentId' ) );
+
+			// Build the Drive query:
+			// Priority: if user provides q explicitly, use it as-is (sanitized).
+			// Else, if parentId provided and looks valid, list that folder's children.
+			// Else, default to trashed=false.
+			$query = '';
+			if ( '' !== $user_q ) {
+				$query = $user_q;
+			} elseif ( '' !== $parent_id && preg_match( '/^[a-zA-Z0-9\-_]+$/', $parent_id ) ) {
+				// phpcs:ignore WordPress.WP.AlternativeFunctions.strip_tags_strip_tags
+				$query = sprintf( '\'%s\' in parents and trashed=false', $parent_id );
+			} else {
 				$query = 'trashed=false';
 			}
 
@@ -558,6 +615,7 @@ class Drive_API extends Base {
 				'fields'   => 'nextPageToken, files(id,name,mimeType,size,modifiedTime,webViewLink,iconLink)',
 				'orderBy'  => 'modifiedTime desc',
 			);
+
 			if ( ! empty( $page_token ) ) {
 				$options['pageToken'] = $page_token;
 			}
@@ -583,9 +641,14 @@ class Drive_API extends Base {
 					'success'       => true,
 					'files'         => $file_list,
 					'nextPageToken' => $results->getNextPageToken(),
-				)
+				),
+				200
 			);
 
+		} catch ( \Google\Service\Exception $ge ) {
+			// Google API specific error.
+			$message = $ge->getMessage();
+			return new WP_Error( 'google_api_error', $message, array( 'status' => 502 ) );
 		} catch ( \Exception $e ) {
 			return new WP_Error( 'api_error', $e->getMessage(), array( 'status' => 500 ) );
 		}
@@ -637,7 +700,8 @@ class Drive_API extends Base {
 						'size'        => $result->getSize(),
 						'webViewLink' => $result->getWebViewLink(),
 					),
-				)
+				),
+				200
 			);
 
 		} catch ( \Exception $e ) {
@@ -685,7 +749,8 @@ class Drive_API extends Base {
 					'content'  => base64_encode( $content ), // phpcs:ignore WordPress.PHP.DiscouragedPHPFunctions.obfuscation_base64_encode
 					'filename' => $file->getName(),
 					'mimeType' => $file->getMimeType(),
-				)
+				),
+				200
 			);
 
 		} catch ( \Exception $e ) {
@@ -728,7 +793,8 @@ class Drive_API extends Base {
 						'mimeType'    => $result->getMimeType(),
 						'webViewLink' => $result->getWebViewLink(),
 					),
-				)
+				),
+				200
 			);
 
 		} catch ( \Exception $e ) {
