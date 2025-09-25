@@ -379,16 +379,30 @@ class Drive_API extends Base {
 		}
 
 		try {
-			$page_size = 20; // This should be an input parameter not static value 20.
-			$query     = 'trashed=false'; // This should be an input parameter not static value.
-
-			$options = array(
-				'pageSize' => $page_size,
-				'q'        => $query,
-				'fields'   => 'files(id,name,mimeType,size,modifiedTime,webViewLink)',
-			);
-
-			$results = $this->drive_service->files->listFiles( $options );
+			$page_size  = (int) $request->get_param( 'pageSize' );
+            if ( $page_size <= 0 ) {
+                $page_size = 20;
+            }
+            if ( $page_size > 100 ) {
+                $page_size = 100; // Drive API max is 1000, but keep UI lighter.
+            }
+            $page_token = sanitize_text_field( (string) $request->get_param( 'pageToken' ) );
+            $query      = sanitize_text_field( (string) $request->get_param( 'q' ) );
+            if ( '' === $query ) {
+                $query = 'trashed=false';
+            }
+ 
+            $options = array(
+                'pageSize' => $page_size,
+                'q'        => $query,
+                'fields'   => 'nextPageToken, files(id,name,mimeType,size,modifiedTime,webViewLink,iconLink)',
+                'orderBy'  => 'modifiedTime desc',
+            );
+            if ( ! empty( $page_token ) ) {
+                $options['pageToken'] = $page_token;
+            }
+ 
+            $results = $this->drive_service->files->listFiles( $options );
 			$files   = $results->getFiles();
 
 			$file_list = array();
@@ -400,13 +414,15 @@ class Drive_API extends Base {
 					'size'         => $file->getSize(),
 					'modifiedTime' => $file->getModifiedTime(),
 					'webViewLink'  => $file->getWebViewLink(),
+					'isFolder'     => 'application/vnd.google-apps.folder' === $file->getMimeType(),
 				);
 			}
 
 			return new WP_REST_Response(
 				array(
-					'success' => true,
-					'files'   => $file_list,
+					'success'      => true,
+                    'files'        => $file_list,
+                    'nextPageToken'=> $results->getNextPageToken(),
 				)
 			);
 
